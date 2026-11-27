@@ -192,14 +192,17 @@ class _ServiceConfigFormState extends State<ServiceConfigForm> {
         );
 
       case ConfigItemType.select:
-        if (item.options == null || item.options!.isEmpty) {
+        final options = item.options;
+        if (options == null || options.isEmpty) {
           return const Text('No options');
         }
 
-        final String currentValue = _currentConfig[item.key]?.toString() ??
-            item.defaultValue?.toString() ??
-            item.options!.first['value']?.toString() ??
-            '';
+        final currentValue = _currentConfig[item.key]?.toString();
+        final defaultValue = item.defaultValue?.toString();
+        final values = options.map((option) => option['value'].toString());
+        final selected = values.contains(currentValue)
+            ? currentValue
+            : (values.contains(defaultValue) ? defaultValue : values.first);
 
         return DropdownButtonFormField<String>(
           decoration: InputDecoration(
@@ -207,8 +210,8 @@ class _ServiceConfigFormState extends State<ServiceConfigForm> {
             helperText: item.description,
             border: const OutlineInputBorder(),
           ),
-          value: currentValue,
-          items: item.options!.map((option) {
+          initialValue: selected,
+          items: options.map((option) {
             return DropdownMenuItem<String>(
               value: option['value'].toString(),
               child: Text(option['label'].toString()),

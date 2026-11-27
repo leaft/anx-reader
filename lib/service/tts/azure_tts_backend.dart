@@ -1,8 +1,8 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:anx_reader/config/shared_preference_provider.dart';
 import 'package:anx_reader/l10n/generated/L10n.dart';
+import 'package:anx_reader/service/tts/models/tts_audio.dart';
 import 'package:anx_reader/service/tts/models/tts_voice.dart';
 import 'package:anx_reader/service/tts/tts_service.dart';
 import 'package:anx_reader/service/tts/tts_service_provider.dart';
@@ -68,7 +68,7 @@ class AzureTtsProvider extends TtsServiceProvider {
   }
 
   @override
-  Future<Uint8List> speak(
+  Future<TtsAudio> speak(
       String text, String? voice, double rate, double pitch) async {
     final config = getConfig();
     final String? key = config['key']?.toString();
@@ -94,7 +94,7 @@ class AzureTtsProvider extends TtsServiceProvider {
     );
 
     if (response.statusCode == 200) {
-      return response.bodyBytes;
+      return TtsAudio.mp3(response.bodyBytes);
     } else {
       throw Exception(
           'Azure TTS failed: ${response.statusCode} ${response.body}');

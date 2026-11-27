@@ -1,7 +1,6 @@
-import 'dart:typed_data';
-
 import 'package:anx_reader/config/shared_preference_provider.dart';
 import 'package:anx_reader/service/config/service_provider.dart';
+import 'package:anx_reader/service/tts/models/tts_audio.dart';
 import 'package:anx_reader/service/tts/models/tts_voice.dart';
 import 'package:flutter/widgets.dart';
 
@@ -24,7 +23,12 @@ abstract class _TtsService {}
 ///   - [getConfigItems]: Configuration items.
 ///   - [getConfig] / [saveConfig]: Configuration management.
 abstract class TtsServiceProvider extends ServiceProvider<dynamic> {
+  static const requestTimeout = Duration(seconds: 10);
+
   String get serviceId => service.toString().split('.').last;
+
+  /// Target amount of ready audio for providers that report its duration.
+  Duration? get prefetchDuration => null;
 
   /// The display label for this service.
   @override
@@ -33,7 +37,7 @@ abstract class TtsServiceProvider extends ServiceProvider<dynamic> {
   /// Generate speech audio from text.
   /// Only required for online TTS services.
   /// System TTS doesn't use this method.
-  Future<Uint8List> speak(
+  Future<TtsAudio> speak(
       String text, String? voice, double rate, double pitch) async {
     throw UnimplementedError('speak() not implemented for $service');
   }

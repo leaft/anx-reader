@@ -1,9 +1,9 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:anx_reader/config/shared_preference_provider.dart';
 import 'package:anx_reader/l10n/generated/L10n.dart';
 import 'package:anx_reader/service/tts/aliyun/aliyun_voices.dart';
+import 'package:anx_reader/service/tts/models/tts_audio.dart';
 import 'package:anx_reader/service/tts/models/tts_voice.dart';
 import 'package:anx_reader/service/tts/tts_service.dart';
 import 'package:anx_reader/service/tts/tts_service_provider.dart';
@@ -126,7 +126,7 @@ class AliyunTtsProvider extends TtsServiceProvider {
   }
 
   @override
-  Future<Uint8List> speak(
+  Future<TtsAudio> speak(
       String text, String? voice, double rate, double pitch) async {
     final config = getConfig();
     final String? appkey = config['appkey']?.toString().trim();
@@ -166,7 +166,7 @@ class AliyunTtsProvider extends TtsServiceProvider {
 
     final contentType = response.headers['content-type'];
     if (contentType != null && contentType.toLowerCase().startsWith('audio/')) {
-      return response.bodyBytes;
+      return TtsAudio.mp3(response.bodyBytes);
     }
 
     final errorBody = utf8.decode(response.bodyBytes, allowMalformed: true);
