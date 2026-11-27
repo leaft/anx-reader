@@ -3,11 +3,11 @@ import 'dart:async';
 import 'package:anx_reader/config/shared_preference_provider.dart';
 import 'package:anx_reader/page/reading_page.dart';
 import 'package:anx_reader/service/tts/base_tts.dart';
-import 'package:anx_reader/service/tts/tts_service.dart';
-import 'package:anx_reader/service/tts/tts_service_provider.dart';
 import 'package:anx_reader/service/tts/models/tts_segment.dart';
 import 'package:anx_reader/service/tts/models/tts_sentence.dart';
 import 'package:anx_reader/service/tts/models/tts_voice.dart';
+import 'package:anx_reader/service/tts/tts_service.dart';
+import 'package:anx_reader/service/tts/tts_service_provider.dart';
 import 'package:anx_reader/utils/log/common.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
@@ -24,7 +24,6 @@ class OnlineTts extends BaseTts {
   // ============ Configuration ============
   static const int _bufferCapacity = 10;
   static const int _batchSize = 5; // Max concurrent fetches
-  static const int _fetchTimeoutSeconds = 10;
   static const int _maxRetries = 2;
 
   // ============ Audio Player ============
@@ -35,7 +34,6 @@ class OnlineTts extends BaseTts {
   // Segments are added in order; audio is fetched in background
   final List<TtsSegment> _buffer = [];
   final Set<String> _bufferKeys = {};
-  TtsSegment? _currentSegment;
   String? _currentVoiceText;
   int _audioFetchVersion = 0; // Version counter for audio fetches
   // ============ Prefetcher State ============
@@ -106,7 +104,6 @@ class OnlineTts extends BaseTts {
   double get rate => Prefs().ttsRate;
 
   @override
-  @override
   bool get isPlaying => ttsStateNotifier.value == TtsStateEnum.playing;
 
   @override
@@ -162,7 +159,6 @@ class OnlineTts extends BaseTts {
   void _resetBuffer() {
     _buffer.clear();
     _bufferKeys.clear();
-    _currentSegment = null;
     _currentVoiceText = null;
   }
 
@@ -180,6 +176,29 @@ class OnlineTts extends BaseTts {
         'Cleared pending audio buffer - will re-fetch with new settings (version: $_audioFetchVersion)');
   }
 
+  int _neededSegments(Duration? target) {
+    if (target == null) return _bufferCapacity - _buffer.length;
+
+    var readyDuration = Duration.zero;
+    var readyCount = 0;
+    for (final segment in _buffer) {
+      final duration = segment.audio?.duration;
+      if (duration == null) continue;
+      readyDuration += duration;
+      readyCount++;
+    }
+
+    final remaining = target - readyDuration;
+    if (remaining <= Duration.zero) return 0;
+    if (readyDuration == Duration.zero) return _batchSize;
+
+    // Estimate how many requests fit into the remaining time using ready audio.
+    final estimatedCount =
+        (remaining.inMicroseconds * readyCount / readyDuration.inMicroseconds)
+            .ceil();
+    return estimatedCount.clamp(1, _batchSize);
+  }
+
   // ============ Producer: Prefetcher Loop ============
   Future<void> _startPrefetcher() async {
     if (_isPrefetcherRunning) return;
@@ -188,58 +207,31 @@ class OnlineTts extends BaseTts {
 
     try {
       while (!_shouldStop) {
-        // Check for segments that need audio re-fetch (after settings change)
-        final segmentsNeedingAudio =
-            _buffer.where((s) => !s.isReady && !s.isSilent).toList();
+        final target = backend.prefetchDuration;
+        final neededCount = _neededSegments(target);
+        final fetchLimit = target == null ? _batchSize : neededCount;
+        final pending =
+            _buffer.where((s) => !s.isReady).take(fetchLimit).toList();
 
-        if (segmentsNeedingAudio.isNotEmpty) {
-          // Re-fetch audio for segments that were cleared
-          for (var i = 0; i < segmentsNeedingAudio.length; i += _batchSize) {
+        if (pending.isEmpty && neededCount > 0) {
+          final sentences = await _collectSentences(neededCount);
+          for (final sentence in sentences) {
             if (_shouldStop) break;
-            final batch =
-                segmentsNeedingAudio.skip(i).take(_batchSize).toList();
-            final futures =
-                batch.map((segment) => _fetchAudioForSegment(segment));
-            await Future.wait(futures);
+            if (!_bufferKeys.add(_segmentKey(sentence))) continue;
+            final segment = TtsSegment(sentence: sentence);
+            _buffer.add(segment);
+            pending.add(segment);
           }
         }
 
-        final neededCount = _bufferCapacity - _buffer.length;
-
-        if (neededCount <= 0) {
-          await Future.delayed(const Duration(milliseconds: 50));
-          continue;
-        }
-
-        // Collect sentences from the reader
-        final sentences = await _collectSentences(neededCount);
-
-        if (sentences.isEmpty) {
+        if (pending.isEmpty) {
           await Future.delayed(const Duration(milliseconds: 100));
           continue;
         }
 
-        // Create placeholder segments in ORDER first
-        final newSegments = <TtsSegment>[];
-        for (final sentence in sentences) {
-          if (_shouldStop) break;
-          final key = _segmentKey(sentence);
-          if (_bufferKeys.contains(key)) continue;
-
-          _bufferKeys.add(key);
-          final segment = TtsSegment(sentence: sentence);
-          newSegments.add(segment);
-          _buffer.add(segment); // Add in order!
-        }
-
-        // Now fetch audio in batches to limit concurrency
-        for (var i = 0; i < newSegments.length; i += _batchSize) {
-          if (_shouldStop) break;
-          final batch = newSegments.skip(i).take(_batchSize).toList();
-          final futures =
-              batch.map((segment) => _fetchAudioForSegment(segment));
-          await Future.wait(futures);
-        }
+        await Future.wait(
+          pending.take(fetchLimit).map(_fetchAudioForSegment),
+        );
       }
     } catch (e) {
       AnxLog.severe('Prefetcher error: $e');
@@ -255,9 +247,10 @@ class OnlineTts extends BaseTts {
     if (state == null) return [];
 
     try {
+      // Look beyond the queued sentences to refill the freed slots.
       final sentences = await state.ttsCollectDetails(
-        count: count,
-        includeCurrent: _buffer.isEmpty && _currentSegment == null,
+        count: _buffer.length + count + 1,
+        includeCurrent: true,
       );
 
       // Filter out already buffered sentences
@@ -266,6 +259,7 @@ class OnlineTts extends BaseTts {
         final key = _segmentKey(s);
         if (!_bufferKeys.contains(key)) {
           newSentences.add(s);
+          if (newSentences.length == count) break;
         }
       }
 
@@ -288,18 +282,16 @@ class OnlineTts extends BaseTts {
     final targetVersion = segment.fetchVersion;
 
     for (var attempt = 0; attempt <= _maxRetries; attempt++) {
-      if (_shouldStop) return;
-      if (segment.isReady) return;
+      if (_shouldStop ||
+          segment.isReady ||
+          segment.fetchVersion != targetVersion) {
+        return;
+      }
 
       try {
-        final bytes = await backend
-            .speak(
-              segment.sentence.text,
-              null,
-              rate,
-              pitch,
-            )
-            .timeout(Duration(seconds: _fetchTimeoutSeconds));
+        final audio = await backend
+            .speak(segment.sentence.text, null, rate, pitch)
+            .timeout(TtsServiceProvider.requestTimeout);
 
         // Check if version is still valid (settings haven't changed during fetch)
         if (segment.fetchVersion != targetVersion) {
@@ -308,10 +300,10 @@ class OnlineTts extends BaseTts {
           return;
         }
 
-        if (bytes.isEmpty) {
+        if (audio.bytes.isEmpty) {
           segment.isSilent = true;
         } else {
-          segment.audio = bytes;
+          segment.audio = audio;
         }
         return; // Success, exit retry loop
       } on TimeoutException {
@@ -362,7 +354,6 @@ class OnlineTts extends BaseTts {
 
         // Now remove it from buffer
         _buffer.removeAt(0);
-        _currentSegment = segment;
         _currentVoiceText = segment.sentence.text;
 
         // Highlight current sentence
@@ -372,13 +363,13 @@ class OnlineTts extends BaseTts {
         if (segment.isSilent) {
           await Future.delayed(const Duration(milliseconds: 100));
           await getNextTextFunction();
-          _currentSegment = null;
           continue;
         }
 
         // Play audio
         _playbackCompleter = Completer<void>();
-        final source = BytesSource(segment.audio!, mimeType: 'audio/mp3');
+        final audio = segment.audio!;
+        final source = BytesSource(audio.bytes, mimeType: audio.mimeType);
 
         try {
           await audioPlayer.play(source);
@@ -388,7 +379,6 @@ class OnlineTts extends BaseTts {
         }
 
         _playbackCompleter = null;
-        _currentSegment = null;
 
         // Advance reader position
         if (!_shouldStop) {
@@ -416,6 +406,11 @@ class OnlineTts extends BaseTts {
   // ============ Public API ============
   @override
   Future<void> speak({String? content}) async {
+    if (content != null) {
+      await speakWithVoice(content);
+      return;
+    }
+
     _shouldStop = false;
     updateTtsState(TtsStateEnum.playing);
 
@@ -478,14 +473,14 @@ class OnlineTts extends BaseTts {
     await speak();
   }
 
-  /// For testing a specific voice in settings
-  Future<void> speakWithVoice(String content, String voice) async {
+  /// Play a sample from the settings page.
+  Future<void> speakWithVoice(String content, [String? voice]) async {
     await stop();
     final audioPlayer = await _ensurePlayer();
 
-    final bytes = await backend.speak(content, voice, rate, pitch);
-    if (bytes.isNotEmpty) {
-      final source = BytesSource(bytes, mimeType: 'audio/mp3');
+    final audio = await backend.speak(content, voice, rate, pitch);
+    if (audio.bytes.isNotEmpty) {
+      final source = BytesSource(audio.bytes, mimeType: audio.mimeType);
       await audioPlayer.play(source);
     }
   }
